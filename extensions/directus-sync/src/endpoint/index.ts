@@ -940,8 +940,21 @@ export default defineEndpoint((router, context) => {
       const collectionsRes = await fetch(`${baseUrl}/collections`, { headers });
       if (!collectionsRes.ok) throw new Error('Failed to fetch remote collections');
       const collectionsData = await collectionsRes.json();
-      const remoteCollections = (collectionsData.data || []).filter(
+      const remoteCollectionsRaw = (collectionsData.data || []).filter(
         (c: any) => !c.collection.startsWith('directus_')
+      );
+
+      // Fetch fields for each remote collection
+      const remoteCollections = await Promise.all(
+        remoteCollectionsRaw.map(async (c: any) => {
+          try {
+            const fieldsRes = await fetch(`${baseUrl}/fields/${c.collection}`, { headers });
+            const fieldsData = fieldsRes.ok ? await fieldsRes.json() : { data: [] };
+            return { ...c, fields: fieldsData.data || [] };
+          } catch (e) {
+            return { ...c, fields: [] };
+          }
+        })
       );
 
       // Fetch remote flows
@@ -964,23 +977,37 @@ export default defineEndpoint((router, context) => {
 
       // Get local data for comparison
       const schema = await getSchema();
-      const { CollectionsService, FlowsService, RolesService, PoliciesService } = services;
+      const { CollectionsService, FieldsService, FlowsService, RolesService, PoliciesService } = services;
 
       const collectionsService = new CollectionsService({ schema, accountability: req.accountability });
+      const fieldsService = new FieldsService({ schema, accountability: req.accountability });
       const flowsService = new FlowsService({ schema, accountability: req.accountability });
       const rolesService = new RolesService({ schema, accountability: req.accountability });
       const policiesService = new PoliciesService({ schema, accountability: req.accountability });
 
-      const [localCollections, localFlows, localRoles, localPolicies] = await Promise.all([
+      const [localCollectionsRaw, localFlows, localRoles, localPolicies] = await Promise.all([
         collectionsService.readByQuery({ limit: -1 }),
         flowsService.readByQuery({ limit: -1 }),
         rolesService.readByQuery({ limit: -1 }),
         policiesService.readByQuery({ limit: -1 }),
       ]);
 
-      const filteredLocalCollections = localCollections.filter(
+      const filteredLocalCollectionsRaw = localCollectionsRaw.filter(
         (c: any) => !c.collection.startsWith('directus_')
       );
+
+      // Fetch fields for each local collection
+      const filteredLocalCollections = await Promise.all(
+        filteredLocalCollectionsRaw.map(async (c: any) => {
+          try {
+            const fields = await fieldsService.readAll(c.collection);
+            return { ...c, fields: fields || [] };
+          } catch (e) {
+            return { ...c, fields: [] };
+          }
+        })
+      );
+
       const filteredLocalRoles = localRoles.filter((r: any) => r.id !== null);
 
       // Build comparison tree
@@ -1440,16 +1467,26 @@ export default defineEndpoint((router, context) => {
           if (exists) {
             // Update fields
             for (const field of remoteFields) {
+              // Check if field exists separately from update
+              let fieldExists = false;
               try {
                 await fieldsService.readOne(collectionName, field.field);
-                await fieldsService.updateOne(collectionName, field.field, {
+                fieldExists = true;
+              } catch (e) {
+                fieldExists = false;
+              }
+
+              if (fieldExists) {
+                // Update existing field - FieldsService uses updateField, not updateOne
+                await fieldsService.updateField(collectionName, {
+                  field: field.field,
                   type: field.type,
                   meta: field.meta,
                   schema: field.schema,
                 });
-              } catch (e) {
-                // FieldsService.createOne takes (collection, fieldData) as separate args
-                await fieldsService.createOne(collectionName, {
+              } else {
+                // Create new field - FieldsService uses createField, not createOne
+                await fieldsService.createField(collectionName, {
                   field: field.field,
                   type: field.type,
                   meta: field.meta,
@@ -1708,13 +1745,34 @@ export default defineEndpoint((router, context) => {
 function normalizeForComparison(data: any, type: 'collection' | 'flow' | 'role' | 'policy'): any {
   if (!data) return data;
 
-  // Fields to ignore during comparison (instance-specific)
+  // Fields to ignore during comparison (instance-specific or auto-generated)
   const ignoredFields = [
+    // Timestamp fields
     'date_created',
     'date_updated',
+    'timestamp',
+    // User reference fields
     'user_created',
     'user_updated',
-    'timestamp',
+    // Collection meta fields that are instance-specific
+    'group',
+    // Field meta fields that can vary
+    'id', // Field IDs are auto-generated
+    'width',
+    'sort',
+    'translations',
+    // Schema fields that can vary between instances
+    'foreign_key_schema',
+    'foreign_key_table',
+    'foreign_key_column',
+    // Operation references (handled separately during sync)
+    'operation',
+    // Users field (role-specific)
+    'users',
+    // Policies field (role-specific)
+    'policies',
+    // Children (role hierarchy)
+    'children',
   ];
 
   // Deep clone and clean the object
