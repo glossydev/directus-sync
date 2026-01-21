@@ -1448,8 +1448,8 @@ export default defineEndpoint((router, context) => {
                   schema: field.schema,
                 });
               } catch (e) {
-                await fieldsService.createOne({
-                  collection: collectionName,
+                // FieldsService.createOne takes (collection, fieldData) as separate args
+                await fieldsService.createOne(collectionName, {
                   field: field.field,
                   type: field.type,
                   meta: field.meta,
@@ -1704,6 +1704,40 @@ export default defineEndpoint((router, context) => {
   });
 });
 
+// Helper function to normalize data for comparison by removing instance-specific fields
+function normalizeForComparison(data: any, type: 'collection' | 'flow' | 'role' | 'policy'): any {
+  if (!data) return data;
+
+  // Fields to ignore during comparison (instance-specific)
+  const ignoredFields = [
+    'date_created',
+    'date_updated',
+    'user_created',
+    'user_updated',
+    'timestamp',
+  ];
+
+  // Deep clone and clean the object
+  const cleaned = JSON.parse(JSON.stringify(data));
+
+  function removeIgnoredFields(obj: any): any {
+    if (obj === null || typeof obj !== 'object') return obj;
+
+    if (Array.isArray(obj)) {
+      return obj.map(removeIgnoredFields);
+    }
+
+    const result: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (ignoredFields.includes(key)) continue;
+      result[key] = removeIgnoredFields(value);
+    }
+    return result;
+  }
+
+  return removeIgnoredFields(cleaned);
+}
+
 // Helper function to compare local and remote items
 function compareItems(
   localItems: { id: string; name: string; data: any }[],
@@ -1728,8 +1762,10 @@ function compareItems(
         localData: local.data,
       });
     } else {
-      // Both exist - compare
-      const isDifferent = JSON.stringify(local.data) !== JSON.stringify(remote.data);
+      // Both exist - compare normalized data
+      const normalizedLocal = normalizeForComparison(local.data, type);
+      const normalizedRemote = normalizeForComparison(remote.data, type);
+      const isDifferent = JSON.stringify(normalizedLocal) !== JSON.stringify(normalizedRemote);
       result.push({
         id: `${type === 'collection' ? 'collection' : type}:${local.id}`,
         name: local.name,

@@ -282,7 +282,42 @@
       <v-card class="dialog-card">
         <v-card-title>Connect to Remote Instance</v-card-title>
         <v-card-text>
-          <p class="dialog-description">Enter the URL and admin access token of the remote Directus instance:</p>
+          <!-- Saved connections -->
+          <div v-if="savedConnections.length > 0" class="saved-connections">
+            <label>Saved Connections</label>
+            <div class="connections-list">
+              <div
+                v-for="conn in savedConnections"
+                :key="conn.id"
+                class="connection-item"
+                :class="{ 'connection-selected': selectedConnectionId === conn.id }"
+                @click="selectSavedConnection(conn)"
+              >
+                <div class="connection-info">
+                  <span class="connection-name">{{ conn.name }}</span>
+                  <span class="connection-url">{{ conn.url }}</span>
+                </div>
+                <v-icon
+                  name="delete"
+                  small
+                  clickable
+                  class="delete-connection"
+                  @click.stop="deleteSavedConnection(conn.id)"
+                />
+              </div>
+            </div>
+          </div>
+
+          <p class="dialog-description">{{ savedConnections.length > 0 ? 'Or enter new connection details:' : 'Enter the URL and admin access token of the remote Directus instance:' }}</p>
+
+          <div class="form-field">
+            <label>Connection Name (optional)</label>
+            <v-input
+              v-model="connectionName"
+              placeholder="My Production Server"
+              :disabled="connectingRemote"
+            />
+          </div>
 
           <div class="form-field">
             <label>Remote URL</label>
@@ -301,6 +336,11 @@
               placeholder="Admin access token"
               :disabled="connectingRemote"
             />
+          </div>
+
+          <div class="save-connection-option">
+            <v-checkbox v-model="saveConnection" :disabled="connectingRemote" />
+            <span>Save this connection for future use</span>
           </div>
 
           <div v-if="remoteError" class="error-state">
@@ -351,10 +391,20 @@
 
           <div class="remote-items-list">
             <div v-for="category in remoteCategories" :key="category.name" class="remote-category">
-              <div class="category-header" @click="category.expanded = !category.expanded">
-                <v-icon :name="category.expanded ? 'expand_more' : 'chevron_right'" />
-                <span class="category-name">{{ category.label }}</span>
-                <span class="category-count">({{ category.items.length }})</span>
+              <div class="category-header">
+                <v-icon
+                  :name="category.expanded ? 'expand_more' : 'chevron_right'"
+                  clickable
+                  @click="toggleCategoryExpand(category.name)"
+                />
+                <v-checkbox
+                  :model-value="isCategoryFullySelected(category.name)"
+                  :indeterminate="isCategoryPartiallySelected(category.name)"
+                  @update:model-value="toggleCategorySelection(category.name)"
+                  @click.stop
+                />
+                <span class="category-name" @click="toggleCategoryExpand(category.name)">{{ category.label }}</span>
+                <span class="category-count">({{ getCategorySelectedCount(category.name) }}/{{ category.items.length }})</span>
               </div>
 
               <div v-if="category.expanded" class="category-items">
@@ -578,6 +628,67 @@ const remoteSyncResults = ref({
   policies: { pushed: 0, pulled: 0, errors: [] as string[] },
 });
 
+// Saved connections state
+interface SavedConnection {
+  id: string;
+  name: string;
+  url: string;
+  token: string;
+}
+const savedConnections = ref<SavedConnection[]>([]);
+const connectionName = ref('');
+const saveConnection = ref(false);
+const selectedConnectionId = ref<string | null>(null);
+
+// Category expansion state (reactive)
+const categoryExpanded = ref<Record<string, boolean>>({
+  collections: true,
+  flows: true,
+  roles: true,
+  policies: true,
+});
+
+// Load saved connections from localStorage
+function loadSavedConnections() {
+  try {
+    const stored = localStorage.getItem('directus-sync-connections');
+    if (stored) {
+      savedConnections.value = JSON.parse(stored);
+    }
+  } catch (e) {
+    console.error('Failed to load saved connections:', e);
+  }
+}
+
+function saveSavedConnections() {
+  try {
+    localStorage.setItem('directus-sync-connections', JSON.stringify(savedConnections.value));
+  } catch (e) {
+    console.error('Failed to save connections:', e);
+  }
+}
+
+function selectSavedConnection(conn: SavedConnection) {
+  selectedConnectionId.value = conn.id;
+  connectionName.value = conn.name;
+  remoteUrl.value = conn.url;
+  remoteToken.value = conn.token;
+  saveConnection.value = false;
+  remoteConnected.value = false;
+  remoteError.value = '';
+}
+
+function deleteSavedConnection(id: string) {
+  savedConnections.value = savedConnections.value.filter(c => c.id !== id);
+  saveSavedConnections();
+  if (selectedConnectionId.value === id) {
+    selectedConnectionId.value = null;
+  }
+}
+
+// Load connections on init
+loadSavedConnections();
+
 interface RemoteCategory {
   name: string;
   label: string;
@@ -588,12 +699,59 @@ interface RemoteCategory {
 const remoteCategories = computed<RemoteCategory[]>(() => {
   if (!remoteComparison.value) return [];
   return [
-    { name: 'collections', label: 'Data Model', expanded: true, items: remoteComparison.value.collections || [] },
-    { name: 'flows', label: 'Flows', expanded: true, items: remoteComparison.value.flows || [] },
-    { name: 'roles', label: 'User Roles', expanded: true, items: remoteComparison.value.roles || [] },
-    { name: 'policies', label: 'Access Policies', expanded: true, items: remoteComparison.value.policies || [] },
+    { name: 'collections', label: 'Data Model', expanded: categoryExpanded.value.collections, items: remoteComparison.value.collections || [] },
+    { name: 'flows', label: 'Flows', expanded: categoryExpanded.value.flows, items: remoteComparison.value.flows || [] },
+    { name: 'roles', label: 'User Roles', expanded: categoryExpanded.value.roles, items: remoteComparison.value.roles || [] },
+    { name: 'policies', label: 'Access Policies', expanded: categoryExpanded.value.policies, items: remoteComparison.value.policies || [] },
   ];
 });
+
+// Category selection helpers
+function toggleCategoryExpand(categoryName: string) {
+  categoryExpanded.value[categoryName] = !categoryExpanded.value[categoryName];
+}
+
+function getCategoryItems(categoryName: string): any[] {
+  if (!remoteComparison.value) return [];
+  return remoteComparison.value[categoryName] || [];
+}
+
+function isCategoryFullySelected(categoryName: string): boolean {
+  const items = getCategoryItems(categoryName);
+  if (items.length === 0) return false;
+  return items.every(item => selectedRemoteItems.value.has(item.id));
+}
+
+function isCategoryPartiallySelected(categoryName: string): boolean {
+  const items = getCategoryItems(categoryName);
+  if (items.length === 0) return false;
+  const selectedCount = items.filter(item => selectedRemoteItems.value.has(item.id)).length;
+  return selectedCount > 0 && selectedCount < items.length;
+}
+
+function getCategorySelectedCount(categoryName: string): number {
+  const items = getCategoryItems(categoryName);
+  return items.filter(item => selectedRemoteItems.value.has(item.id)).length;
+}
+
+function toggleCategorySelection(categoryName: string) {
+  const items = getCategoryItems(categoryName);
+  const allSelected = isCategoryFullySelected(categoryName);
+
+  if (allSelected) {
+    // Deselect all items in this category
+    for (const item of items) {
+      selectedRemoteItems.value.delete(item.id);
+    }
+  } else {
+    // Select all items in this category
+    for (const item of items) {
+      selectedRemoteItems.value.add(item.id);
+    }
+  }
+  // Force reactivity
+  selectedRemoteItems.value = new Set(selectedRemoteItems.value);
+}
 
 const hasRemoteSyncErrors = computed(() => {
   return (
@@ -808,11 +966,19 @@ function openRemoteDialog() {
   showRemoteDialog.value = true;
   remoteError.value = '';
   remoteConnected.value = false;
+  // Reset fields if no connection was selected
+  if (!selectedConnectionId.value) {
+    connectionName.value = '';
+    remoteUrl.value = '';
+    remoteToken.value = '';
+  }
+  saveConnection.value = false;
 }
 
 function closeRemoteDialog() {
   showRemoteDialog.value = false;
   remoteError.value = '';
+  selectedConnectionId.value = null;
 }
 
 function closeRemoteComparison() {
@@ -842,6 +1008,20 @@ async function testRemoteConnection() {
 
     if (response.data.success) {
       remoteConnected.value = true;
+
+      // Save connection if requested
+      if (saveConnection.value && !selectedConnectionId.value) {
+        const newConnection: SavedConnection = {
+          id: crypto.randomUUID(),
+          name: connectionName.value || new URL(remoteUrl.value).hostname,
+          url: remoteUrl.value,
+          token: remoteToken.value,
+        };
+        savedConnections.value.push(newConnection);
+        saveSavedConnections();
+        selectedConnectionId.value = newConnection.id;
+      }
+
       // Auto-scan after successful connection
       await scanRemote();
     }
@@ -1370,5 +1550,83 @@ async function rescanRemote() {
 
 .sync-results div {
   padding: 4px 0;
+}
+
+/* Saved connections */
+.saved-connections {
+  margin-bottom: 20px;
+}
+
+.saved-connections label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--theme--foreground-normal);
+}
+
+.connections-list {
+  border: var(--theme--border-width) solid var(--theme--form--field--input--border-color);
+  border-radius: var(--theme--border-radius);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.connection-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: var(--theme--border-width) solid var(--theme--form--field--input--border-color);
+  transition: background 0.15s ease;
+}
+
+.connection-item:last-child {
+  border-bottom: none;
+}
+
+.connection-item:hover {
+  background: var(--theme--background-accent);
+}
+
+.connection-item.connection-selected {
+  background: rgba(var(--theme--primary-rgb), 0.1);
+  border-left: 3px solid var(--theme--primary);
+}
+
+.connection-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.connection-name {
+  font-weight: 600;
+  color: var(--theme--foreground-normal);
+}
+
+.connection-url {
+  font-size: 12px;
+  color: var(--theme--foreground-subdued);
+}
+
+.delete-connection {
+  color: var(--theme--foreground-subdued);
+  opacity: 0.5;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.delete-connection:hover {
+  opacity: 1;
+  color: var(--theme--danger);
+}
+
+.save-connection-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--theme--foreground-subdued);
+  font-size: 14px;
 }
 </style>
