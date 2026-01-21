@@ -105,3 +105,32 @@ export interface ImportComparisonResult {
     modified: number;
   };
 }
+
+// Remote sync types
+export interface RemoteConnection {
+  url: string;
+  token: string;
+}
+
+export interface RemoteComparisonResult {
+  local: TreeNode[];
+  remote: TreeNode[];
+  summary: {
+    localOnly: number;
+    remoteOnly: number;
+    matching: number;
+    different: number;
+  };
+}
+
+export interface SyncItem {
+  id: string;
+  name: string;
+  type: 'collection' | 'flow' | 'role' | 'policy';
+  localStatus: 'exists' | 'missing';
+  remoteStatus: 'exists' | 'missing';
+  comparison: 'identical' | 'different' | 'local-only' | 'remote-only';
+  diff?: string[];
+  localData?: any;
+  remoteData?: any;
+}

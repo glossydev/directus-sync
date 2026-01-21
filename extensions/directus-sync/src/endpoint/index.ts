@@ -891,4 +891,872 @@ export default defineEndpoint((router, context) => {
       res.status(500).json({ error: error.message });
     }
   });
+
+  // Test remote connection
+  router.post('/remote/test', async (req, res) => {
+    try {
+      const { url, token } = req.body as { url: string; token: string };
+
+      if (!url || !token) {
+        return res.status(400).json({ error: 'URL and token are required' });
+      }
+
+      // Normalize URL
+      const baseUrl = url.replace(/\/+$/, '');
+
+      // Test connection by fetching server info
+      const response = await fetch(`${baseUrl}/server/info`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        return res.status(response.status).json({ error: `Connection failed: ${error}` });
+      }
+
+      const info = await response.json();
+      res.json({ success: true, info: info.data });
+    } catch (error: any) {
+      console.error('Remote connection test failed:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Fetch remote data for comparison
+  router.post('/remote/scan', async (req, res) => {
+    try {
+      const { url, token } = req.body as { url: string; token: string };
+
+      if (!url || !token) {
+        return res.status(400).json({ error: 'URL and token are required' });
+      }
+
+      const baseUrl = url.replace(/\/+$/, '');
+      const headers = { Authorization: `Bearer ${token}` };
+
+      // Fetch remote collections
+      const collectionsRes = await fetch(`${baseUrl}/collections`, { headers });
+      if (!collectionsRes.ok) throw new Error('Failed to fetch remote collections');
+      const collectionsData = await collectionsRes.json();
+      const remoteCollections = (collectionsData.data || []).filter(
+        (c: any) => !c.collection.startsWith('directus_')
+      );
+
+      // Fetch remote flows
+      const flowsRes = await fetch(`${baseUrl}/flows`, { headers });
+      if (!flowsRes.ok) throw new Error('Failed to fetch remote flows');
+      const flowsData = await flowsRes.json();
+      const remoteFlows = flowsData.data || [];
+
+      // Fetch remote roles
+      const rolesRes = await fetch(`${baseUrl}/roles`, { headers });
+      if (!rolesRes.ok) throw new Error('Failed to fetch remote roles');
+      const rolesData = await rolesRes.json();
+      const remoteRoles = (rolesData.data || []).filter((r: any) => r.id !== null);
+
+      // Fetch remote policies
+      const policiesRes = await fetch(`${baseUrl}/policies`, { headers });
+      if (!policiesRes.ok) throw new Error('Failed to fetch remote policies');
+      const policiesData = await policiesRes.json();
+      const remotePolicies = policiesData.data || [];
+
+      // Get local data for comparison
+      const schema = await getSchema();
+      const { CollectionsService, FlowsService, RolesService, PoliciesService } = services;
+
+      const collectionsService = new CollectionsService({ schema, accountability: req.accountability });
+      const flowsService = new FlowsService({ schema, accountability: req.accountability });
+      const rolesService = new RolesService({ schema, accountability: req.accountability });
+      const policiesService = new PoliciesService({ schema, accountability: req.accountability });
+
+      const [localCollections, localFlows, localRoles, localPolicies] = await Promise.all([
+        collectionsService.readByQuery({ limit: -1 }),
+        flowsService.readByQuery({ limit: -1 }),
+        rolesService.readByQuery({ limit: -1 }),
+        policiesService.readByQuery({ limit: -1 }),
+      ]);
+
+      const filteredLocalCollections = localCollections.filter(
+        (c: any) => !c.collection.startsWith('directus_')
+      );
+      const filteredLocalRoles = localRoles.filter((r: any) => r.id !== null);
+
+      // Build comparison tree
+      const comparison = {
+        collections: compareItems(
+          filteredLocalCollections.map((c: any) => ({ id: c.collection, name: c.collection, data: c })),
+          remoteCollections.map((c: any) => ({ id: c.collection, name: c.collection, data: c })),
+          'collection'
+        ),
+        flows: compareItems(
+          localFlows.map((f: any) => ({ id: f.id, name: f.name || f.id, data: f })),
+          remoteFlows.map((f: any) => ({ id: f.id, name: f.name || f.id, data: f })),
+          'flow'
+        ),
+        roles: compareItems(
+          filteredLocalRoles.map((r: any) => ({ id: r.id, name: r.name || r.id, data: r })),
+          remoteRoles.map((r: any) => ({ id: r.id, name: r.name || r.id, data: r })),
+          'role'
+        ),
+        policies: compareItems(
+          localPolicies.map((p: any) => ({ id: p.id, name: p.name || p.id, data: p })),
+          remotePolicies.map((p: any) => ({ id: p.id, name: p.name || p.id, data: p })),
+          'policy'
+        ),
+      };
+
+      // Calculate summary
+      const allItems = [
+        ...comparison.collections,
+        ...comparison.flows,
+        ...comparison.roles,
+        ...comparison.policies,
+      ];
+
+      const summary = {
+        localOnly: allItems.filter((i) => i.comparison === 'local-only').length,
+        remoteOnly: allItems.filter((i) => i.comparison === 'remote-only').length,
+        matching: allItems.filter((i) => i.comparison === 'identical').length,
+        different: allItems.filter((i) => i.comparison === 'different').length,
+      };
+
+      res.json({ comparison, summary });
+    } catch (error: any) {
+      console.error('Remote scan failed:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Push items to remote
+  router.post('/remote/push', async (req, res) => {
+    try {
+      const { url, token, selectedIds } = req.body as {
+        url: string;
+        token: string;
+        selectedIds: string[];
+      };
+
+      if (!url || !token || !selectedIds) {
+        return res.status(400).json({ error: 'URL, token, and selectedIds are required' });
+      }
+
+      const baseUrl = url.replace(/\/+$/, '');
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      };
+
+      const schema = await getSchema();
+      const {
+        CollectionsService,
+        FieldsService,
+        FlowsService,
+        OperationsService,
+        RolesService,
+        PoliciesService,
+        PermissionsService,
+      } = services;
+
+      const collectionsService = new CollectionsService({ schema, accountability: req.accountability });
+      const fieldsService = new FieldsService({ schema, accountability: req.accountability });
+      const flowsService = new FlowsService({ schema, accountability: req.accountability });
+      const operationsService = new OperationsService({ schema, accountability: req.accountability });
+      const rolesService = new RolesService({ schema, accountability: req.accountability });
+      const policiesService = new PoliciesService({ schema, accountability: req.accountability });
+      const permissionsService = new PermissionsService({ schema, accountability: req.accountability });
+
+      const results = {
+        collections: { pushed: 0, errors: [] as string[] },
+        flows: { pushed: 0, errors: [] as string[] },
+        roles: { pushed: 0, errors: [] as string[] },
+        policies: { pushed: 0, errors: [] as string[] },
+      };
+
+      // Push collections
+      const collectionIds = selectedIds
+        .filter((id) => id.startsWith('collection:'))
+        .map((id) => id.replace('collection:', ''));
+
+      for (const collectionName of collectionIds) {
+        try {
+          const collection = await collectionsService.readOne(collectionName);
+          const fields = await fieldsService.readAll(collectionName);
+
+          // Check if collection exists on remote
+          const checkRes = await fetch(`${baseUrl}/collections/${collectionName}`, { headers });
+
+          if (checkRes.ok) {
+            // Update existing - push fields
+            for (const field of fields) {
+              const fieldCheckRes = await fetch(
+                `${baseUrl}/fields/${collectionName}/${field.field}`,
+                { headers }
+              );
+
+              if (fieldCheckRes.ok) {
+                await fetch(`${baseUrl}/fields/${collectionName}/${field.field}`, {
+                  method: 'PATCH',
+                  headers,
+                  body: JSON.stringify({
+                    type: field.type,
+                    meta: field.meta,
+                    schema: field.schema,
+                  }),
+                });
+              } else {
+                await fetch(`${baseUrl}/fields/${collectionName}`, {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify({
+                    field: field.field,
+                    type: field.type,
+                    meta: field.meta,
+                    schema: field.schema,
+                  }),
+                });
+              }
+            }
+          } else {
+            // Create new collection
+            await fetch(`${baseUrl}/collections`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                collection: collectionName,
+                meta: collection.meta,
+                schema: collection.schema,
+                fields: fields.map((f: any) => ({
+                  field: f.field,
+                  type: f.type,
+                  meta: f.meta,
+                  schema: f.schema,
+                })),
+              }),
+            });
+          }
+          results.collections.pushed++;
+        } catch (error: any) {
+          results.collections.errors.push(`${collectionName}: ${error.message}`);
+        }
+      }
+
+      // Push roles
+      const roleIds = selectedIds
+        .filter((id) => id.startsWith('role:'))
+        .map((id) => id.replace('role:', ''));
+
+      for (const roleId of roleIds) {
+        try {
+          const role = await rolesService.readOne(roleId);
+          const checkRes = await fetch(`${baseUrl}/roles/${roleId}`, { headers });
+
+          const roleData = {
+            name: role.name,
+            icon: role.icon,
+            description: role.description,
+            parent: role.parent,
+          };
+
+          if (checkRes.ok) {
+            await fetch(`${baseUrl}/roles/${roleId}`, {
+              method: 'PATCH',
+              headers,
+              body: JSON.stringify(roleData),
+            });
+          } else {
+            await fetch(`${baseUrl}/roles`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ id: roleId, ...roleData }),
+            });
+          }
+          results.roles.pushed++;
+        } catch (error: any) {
+          results.roles.errors.push(`${roleId}: ${error.message}`);
+        }
+      }
+
+      // Push policies
+      const policyIds = selectedIds
+        .filter((id) => id.startsWith('policy:'))
+        .map((id) => id.replace('policy:', ''));
+
+      for (const policyId of policyIds) {
+        try {
+          const policy = await policiesService.readOne(policyId);
+          const permissions = await permissionsService.readByQuery({
+            filter: { policy: { _eq: policyId } },
+            limit: -1,
+          });
+
+          const checkRes = await fetch(`${baseUrl}/policies/${policyId}`, { headers });
+
+          const policyData = {
+            name: policy.name,
+            icon: policy.icon,
+            description: policy.description,
+            ip_access: policy.ip_access,
+            enforce_tfa: policy.enforce_tfa,
+            admin_access: policy.admin_access,
+            app_access: policy.app_access,
+          };
+
+          if (checkRes.ok) {
+            await fetch(`${baseUrl}/policies/${policyId}`, {
+              method: 'PATCH',
+              headers,
+              body: JSON.stringify(policyData),
+            });
+
+            // Delete existing permissions and recreate
+            const remotePermsRes = await fetch(
+              `${baseUrl}/permissions?filter[policy][_eq]=${policyId}`,
+              { headers }
+            );
+            if (remotePermsRes.ok) {
+              const remotePerms = await remotePermsRes.json();
+              for (const perm of remotePerms.data || []) {
+                await fetch(`${baseUrl}/permissions/${perm.id}`, {
+                  method: 'DELETE',
+                  headers,
+                });
+              }
+            }
+          } else {
+            await fetch(`${baseUrl}/policies`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ id: policyId, ...policyData }),
+            });
+          }
+
+          // Create permissions
+          for (const perm of permissions) {
+            await fetch(`${baseUrl}/permissions`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                policy: policyId,
+                collection: perm.collection,
+                action: perm.action,
+                permissions: perm.permissions,
+                validation: perm.validation,
+                presets: perm.presets,
+                fields: perm.fields,
+              }),
+            });
+          }
+
+          results.policies.pushed++;
+        } catch (error: any) {
+          results.policies.errors.push(`${policyId}: ${error.message}`);
+        }
+      }
+
+      // Push flows
+      const flowIds = selectedIds
+        .filter((id) => id.startsWith('flow:'))
+        .map((id) => id.replace('flow:', ''));
+
+      for (const flowId of flowIds) {
+        try {
+          const flow = await flowsService.readOne(flowId);
+          const operations = await operationsService.readByQuery({
+            filter: { flow: { _eq: flowId } },
+            limit: -1,
+          });
+
+          const checkRes = await fetch(`${baseUrl}/flows/${flowId}`, { headers });
+
+          const flowData = {
+            name: flow.name,
+            icon: flow.icon,
+            color: flow.color,
+            description: flow.description,
+            status: flow.status,
+            trigger: flow.trigger,
+            accountability: flow.accountability,
+            options: flow.options,
+          };
+
+          if (checkRes.ok) {
+            // Update flow
+            await fetch(`${baseUrl}/flows/${flowId}`, {
+              method: 'PATCH',
+              headers,
+              body: JSON.stringify(flowData),
+            });
+
+            // Delete existing operations
+            const remoteOpsRes = await fetch(
+              `${baseUrl}/operations?filter[flow][_eq]=${flowId}`,
+              { headers }
+            );
+            if (remoteOpsRes.ok) {
+              const remoteOps = await remoteOpsRes.json();
+              for (const op of remoteOps.data || []) {
+                await fetch(`${baseUrl}/operations/${op.id}`, {
+                  method: 'DELETE',
+                  headers,
+                });
+              }
+            }
+          } else {
+            await fetch(`${baseUrl}/flows`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ id: flowId, ...flowData }),
+            });
+          }
+
+          // Create operations
+          for (const op of operations) {
+            await fetch(`${baseUrl}/operations`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                id: op.id,
+                flow: flowId,
+                name: op.name,
+                key: op.key,
+                type: op.type,
+                position_x: op.position_x,
+                position_y: op.position_y,
+                options: op.options,
+              }),
+            });
+          }
+
+          // Update operation references
+          for (const op of operations) {
+            if (op.resolve || op.reject) {
+              await fetch(`${baseUrl}/operations/${op.id}`, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({
+                  resolve: op.resolve,
+                  reject: op.reject,
+                }),
+              });
+            }
+          }
+
+          // Update flow with first operation
+          const firstOp = operations.find(
+            (op: any) => !operations.some((o: any) => o.resolve === op.id || o.reject === op.id)
+          );
+          if (firstOp) {
+            await fetch(`${baseUrl}/flows/${flowId}`, {
+              method: 'PATCH',
+              headers,
+              body: JSON.stringify({ operation: firstOp.id }),
+            });
+          }
+
+          results.flows.pushed++;
+        } catch (error: any) {
+          results.flows.errors.push(`${flowId}: ${error.message}`);
+        }
+      }
+
+      res.json({ success: true, results });
+    } catch (error: any) {
+      console.error('Push failed:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Pull items from remote
+  router.post('/remote/pull', async (req, res) => {
+    try {
+      const { url, token, selectedIds } = req.body as {
+        url: string;
+        token: string;
+        selectedIds: string[];
+      };
+
+      if (!url || !token || !selectedIds) {
+        return res.status(400).json({ error: 'URL, token, and selectedIds are required' });
+      }
+
+      const baseUrl = url.replace(/\/+$/, '');
+      const headers = { Authorization: `Bearer ${token}` };
+
+      const schema = await getSchema();
+      const {
+        CollectionsService,
+        FieldsService,
+        FlowsService,
+        OperationsService,
+        RolesService,
+        PoliciesService,
+        PermissionsService,
+      } = services;
+
+      const collectionsService = new CollectionsService({ schema, accountability: req.accountability });
+      const fieldsService = new FieldsService({ schema, accountability: req.accountability });
+      const flowsService = new FlowsService({ schema, accountability: req.accountability });
+      const operationsService = new OperationsService({ schema, accountability: req.accountability });
+      const rolesService = new RolesService({ schema, accountability: req.accountability });
+      const policiesService = new PoliciesService({ schema, accountability: req.accountability });
+      const permissionsService = new PermissionsService({ schema, accountability: req.accountability });
+
+      const results = {
+        collections: { pulled: 0, errors: [] as string[] },
+        flows: { pulled: 0, errors: [] as string[] },
+        roles: { pulled: 0, errors: [] as string[] },
+        policies: { pulled: 0, errors: [] as string[] },
+      };
+
+      // Pull collections
+      const collectionIds = selectedIds
+        .filter((id) => id.startsWith('collection:'))
+        .map((id) => id.replace('collection:', ''));
+
+      for (const collectionName of collectionIds) {
+        try {
+          // Fetch from remote
+          const collectionRes = await fetch(`${baseUrl}/collections/${collectionName}`, { headers });
+          if (!collectionRes.ok) throw new Error('Collection not found on remote');
+          const collectionData = await collectionRes.json();
+          const remoteCollection = collectionData.data;
+
+          const fieldsRes = await fetch(`${baseUrl}/fields/${collectionName}`, { headers });
+          if (!fieldsRes.ok) throw new Error('Fields not found on remote');
+          const fieldsData = await fieldsRes.json();
+          const remoteFields = fieldsData.data || [];
+
+          // Check if exists locally
+          let exists = false;
+          try {
+            await collectionsService.readOne(collectionName);
+            exists = true;
+          } catch (e) {
+            exists = false;
+          }
+
+          if (exists) {
+            // Update fields
+            for (const field of remoteFields) {
+              try {
+                await fieldsService.readOne(collectionName, field.field);
+                await fieldsService.updateOne(collectionName, field.field, {
+                  type: field.type,
+                  meta: field.meta,
+                  schema: field.schema,
+                });
+              } catch (e) {
+                await fieldsService.createOne({
+                  collection: collectionName,
+                  field: field.field,
+                  type: field.type,
+                  meta: field.meta,
+                  schema: field.schema,
+                });
+              }
+            }
+          } else {
+            // Create collection
+            await collectionsService.createOne({
+              collection: collectionName,
+              meta: remoteCollection.meta,
+              schema: remoteCollection.schema,
+              fields: remoteFields.map((f: any) => ({
+                field: f.field,
+                type: f.type,
+                meta: f.meta,
+                schema: f.schema,
+              })),
+            });
+          }
+          results.collections.pulled++;
+        } catch (error: any) {
+          results.collections.errors.push(`${collectionName}: ${error.message}`);
+        }
+      }
+
+      // Pull roles
+      const roleIds = selectedIds
+        .filter((id) => id.startsWith('role:'))
+        .map((id) => id.replace('role:', ''));
+
+      for (const roleId of roleIds) {
+        try {
+          const roleRes = await fetch(`${baseUrl}/roles/${roleId}`, { headers });
+          if (!roleRes.ok) throw new Error('Role not found on remote');
+          const roleData = await roleRes.json();
+          const remoteRole = roleData.data;
+
+          let exists = false;
+          try {
+            await rolesService.readOne(roleId);
+            exists = true;
+          } catch (e) {
+            exists = false;
+          }
+
+          if (exists) {
+            await rolesService.updateOne(roleId, {
+              name: remoteRole.name,
+              icon: remoteRole.icon,
+              description: remoteRole.description,
+              parent: remoteRole.parent,
+            });
+          } else {
+            await rolesService.createOne({
+              id: roleId,
+              name: remoteRole.name,
+              icon: remoteRole.icon,
+              description: remoteRole.description,
+              parent: remoteRole.parent,
+            });
+          }
+          results.roles.pulled++;
+        } catch (error: any) {
+          results.roles.errors.push(`${roleId}: ${error.message}`);
+        }
+      }
+
+      // Pull policies
+      const policyIds = selectedIds
+        .filter((id) => id.startsWith('policy:'))
+        .map((id) => id.replace('policy:', ''));
+
+      for (const policyId of policyIds) {
+        try {
+          const policyRes = await fetch(`${baseUrl}/policies/${policyId}`, { headers });
+          if (!policyRes.ok) throw new Error('Policy not found on remote');
+          const policyData = await policyRes.json();
+          const remotePolicy = policyData.data;
+
+          const permsRes = await fetch(
+            `${baseUrl}/permissions?filter[policy][_eq]=${policyId}&limit=-1`,
+            { headers }
+          );
+          const permsData = await permsRes.json();
+          const remotePermissions = permsData.data || [];
+
+          let exists = false;
+          try {
+            await policiesService.readOne(policyId);
+            exists = true;
+          } catch (e) {
+            exists = false;
+          }
+
+          if (exists) {
+            await policiesService.updateOne(policyId, {
+              name: remotePolicy.name,
+              icon: remotePolicy.icon,
+              description: remotePolicy.description,
+              ip_access: remotePolicy.ip_access,
+              enforce_tfa: remotePolicy.enforce_tfa,
+              admin_access: remotePolicy.admin_access,
+              app_access: remotePolicy.app_access,
+            });
+
+            // Delete and recreate permissions
+            const existingPerms = await permissionsService.readByQuery({
+              filter: { policy: { _eq: policyId } },
+              limit: -1,
+            });
+            for (const perm of existingPerms) {
+              await permissionsService.deleteOne(perm.id);
+            }
+          } else {
+            await policiesService.createOne({
+              id: policyId,
+              name: remotePolicy.name,
+              icon: remotePolicy.icon,
+              description: remotePolicy.description,
+              ip_access: remotePolicy.ip_access,
+              enforce_tfa: remotePolicy.enforce_tfa,
+              admin_access: remotePolicy.admin_access,
+              app_access: remotePolicy.app_access,
+            });
+          }
+
+          // Create permissions
+          for (const perm of remotePermissions) {
+            await permissionsService.createOne({
+              policy: policyId,
+              collection: perm.collection,
+              action: perm.action,
+              permissions: perm.permissions,
+              validation: perm.validation,
+              presets: perm.presets,
+              fields: perm.fields,
+            });
+          }
+
+          results.policies.pulled++;
+        } catch (error: any) {
+          results.policies.errors.push(`${policyId}: ${error.message}`);
+        }
+      }
+
+      // Pull flows
+      const flowIds = selectedIds
+        .filter((id) => id.startsWith('flow:'))
+        .map((id) => id.replace('flow:', ''));
+
+      for (const flowId of flowIds) {
+        try {
+          const flowRes = await fetch(`${baseUrl}/flows/${flowId}`, { headers });
+          if (!flowRes.ok) throw new Error('Flow not found on remote');
+          const flowData = await flowRes.json();
+          const remoteFlow = flowData.data;
+
+          const opsRes = await fetch(
+            `${baseUrl}/operations?filter[flow][_eq]=${flowId}&limit=-1`,
+            { headers }
+          );
+          const opsData = await opsRes.json();
+          const remoteOperations = opsData.data || [];
+
+          let exists = false;
+          try {
+            await flowsService.readOne(flowId);
+            exists = true;
+          } catch (e) {
+            exists = false;
+          }
+
+          if (exists) {
+            await flowsService.updateOne(flowId, {
+              name: remoteFlow.name,
+              icon: remoteFlow.icon,
+              color: remoteFlow.color,
+              description: remoteFlow.description,
+              status: remoteFlow.status,
+              trigger: remoteFlow.trigger,
+              accountability: remoteFlow.accountability,
+              options: remoteFlow.options,
+            });
+
+            // Delete existing operations
+            const existingOps = await operationsService.readByQuery({
+              filter: { flow: { _eq: flowId } },
+              limit: -1,
+            });
+            for (const op of existingOps) {
+              await operationsService.deleteOne(op.id);
+            }
+          } else {
+            await flowsService.createOne({
+              id: flowId,
+              name: remoteFlow.name,
+              icon: remoteFlow.icon,
+              color: remoteFlow.color,
+              description: remoteFlow.description,
+              status: remoteFlow.status,
+              trigger: remoteFlow.trigger,
+              accountability: remoteFlow.accountability,
+              options: remoteFlow.options,
+            });
+          }
+
+          // Create operations
+          for (const op of remoteOperations) {
+            await operationsService.createOne({
+              id: op.id,
+              flow: flowId,
+              name: op.name,
+              key: op.key,
+              type: op.type,
+              position_x: op.position_x,
+              position_y: op.position_y,
+              options: op.options,
+            });
+          }
+
+          // Update operation references
+          for (const op of remoteOperations) {
+            if (op.resolve || op.reject) {
+              await operationsService.updateOne(op.id, {
+                resolve: op.resolve,
+                reject: op.reject,
+              });
+            }
+          }
+
+          // Update flow with first operation
+          const firstOp = remoteOperations.find(
+            (op: any) => !remoteOperations.some((o: any) => o.resolve === op.id || o.reject === op.id)
+          );
+          if (firstOp) {
+            await flowsService.updateOne(flowId, { operation: firstOp.id });
+          }
+
+          results.flows.pulled++;
+        } catch (error: any) {
+          results.flows.errors.push(`${flowId}: ${error.message}`);
+        }
+      }
+
+      res.json({ success: true, results });
+    } catch (error: any) {
+      console.error('Pull failed:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
 });
+
+// Helper function to compare local and remote items
+function compareItems(
+  localItems: { id: string; name: string; data: any }[],
+  remoteItems: { id: string; name: string; data: any }[],
+  type: 'collection' | 'flow' | 'role' | 'policy'
+): any[] {
+  const result: any[] = [];
+  const localMap = new Map(localItems.map((i) => [i.id, i]));
+  const remoteMap = new Map(remoteItems.map((i) => [i.id, i]));
+
+  // Check local items
+  for (const local of localItems) {
+    const remote = remoteMap.get(local.id);
+    if (!remote) {
+      result.push({
+        id: `${type === 'collection' ? 'collection' : type}:${local.id}`,
+        name: local.name,
+        type,
+        localStatus: 'exists',
+        remoteStatus: 'missing',
+        comparison: 'local-only',
+        localData: local.data,
+      });
+    } else {
+      // Both exist - compare
+      const isDifferent = JSON.stringify(local.data) !== JSON.stringify(remote.data);
+      result.push({
+        id: `${type === 'collection' ? 'collection' : type}:${local.id}`,
+        name: local.name,
+        type,
+        localStatus: 'exists',
+        remoteStatus: 'exists',
+        comparison: isDifferent ? 'different' : 'identical',
+        localData: local.data,
+        remoteData: remote.data,
+      });
+    }
+  }
+
+  // Check remote-only items
+  for (const remote of remoteItems) {
+    if (!localMap.has(remote.id)) {
+      result.push({
+        id: `${type === 'collection' ? 'collection' : type}:${remote.id}`,
+        name: remote.name,
+        type,
+        localStatus: 'missing',
+        remoteStatus: 'exists',
+        comparison: 'remote-only',
+        remoteData: remote.data,
+      });
+    }
+  }
+
+  return result;
+}
