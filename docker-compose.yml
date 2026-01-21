@@ -1,0 +1,17 @@
+services:
+  directus:
+    image: directus/directus:11
+    ports:
+      - "8056:8055"
+    volumes:
+      - ./data/database:/directus/database
+      - ./data/uploads:/directus/uploads
+      - ./extensions:/directus/extensions
+    environment:
+      SECRET: "a-very-secret-key-change-in-production"
+      ADMIN_EMAIL: "admin@example.com"
+      ADMIN_PASSWORD: "admin123"
+      DB_CLIENT: "sqlite3"
+      DB_FILENAME: "/directus/database/data.db"
+      WEBSOCKETS_ENABLED: "true"
+      EXTENSIONS_AUTO_RELOAD: "true"

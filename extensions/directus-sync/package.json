@@ -1,0 +1,36 @@
+{
+  "name": "directus-extension-sync",
+  "version": "1.0.0",
+  "description": "Sync data models, flows, user roles, and access policies between Directus instances",
+  "type": "module",
+  "directus:extension": {
+    "type": "bundle",
+    "path": {
+      "app": "dist/app.js",
+      "api": "dist/api.js"
+    },
+    "entries": [
+      {
+        "type": "module",
+        "name": "sync",
+        "source": "src/module/index.ts"
+      },
+      {
+        "type": "endpoint",
+        "name": "sync-api",
+        "source": "src/endpoint/index.ts"
+      }
+    ],
+    "host": "^11.0.0"
+  },
+  "scripts": {
+    "build": "directus-extension build",
+    "dev": "directus-extension build -w --no-minify"
+  },
+  "devDependencies": {
+    "@directus/extensions-sdk": "^12.0.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "vue": "^3.4.0"
+  }
+}
