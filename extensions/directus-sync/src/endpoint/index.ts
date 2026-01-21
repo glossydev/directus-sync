@@ -1477,13 +1477,14 @@ export default defineEndpoint((router, context) => {
               }
 
               if (fieldExists) {
-                // Update existing field - FieldsService uses updateField, not updateOne
-                await fieldsService.updateField(collectionName, {
-                  field: field.field,
-                  type: field.type,
-                  meta: field.meta,
-                  schema: field.schema,
-                });
+                // Update existing field - only update meta (UI settings), not schema (database column)
+                // Changing schema would require database migrations which is problematic
+                if (field.meta) {
+                  await fieldsService.updateField(collectionName, {
+                    field: field.field,
+                    meta: field.meta,
+                  });
+                }
               } else {
                 // Create new field - FieldsService uses createField, not createOne
                 await fieldsService.createField(collectionName, {
@@ -1756,15 +1757,33 @@ function normalizeForComparison(data: any, type: 'collection' | 'flow' | 'role' 
     'user_updated',
     // Collection meta fields that are instance-specific
     'group',
-    // Field meta fields that can vary
+    // Field meta fields that can vary between instances
     'id', // Field IDs are auto-generated
     'width',
     'sort',
     'translations',
+    'conditions',
+    'required',
+    'readonly',
+    'hidden',
+    'display',
+    'display_options',
+    'validation',
+    'validation_message',
     // Schema fields that can vary between instances
     'foreign_key_schema',
     'foreign_key_table',
     'foreign_key_column',
+    'default_value',
+    'max_length',
+    'is_nullable',
+    'is_unique',
+    'is_primary_key',
+    'has_auto_increment',
+    'numeric_precision',
+    'numeric_scale',
+    'comment',
+    'schema', // Entire schema object can vary
     // Operation references (handled separately during sync)
     'operation',
     // Users field (role-specific)
@@ -1773,6 +1792,8 @@ function normalizeForComparison(data: any, type: 'collection' | 'flow' | 'role' 
     'policies',
     // Children (role hierarchy)
     'children',
+    // Fields array - compare separately by field name, not entire array
+    'fields',
   ];
 
   // Deep clone and clean the object
@@ -1794,6 +1815,13 @@ function normalizeForComparison(data: any, type: 'collection' | 'flow' | 'role' 
   }
 
   return removeIgnoredFields(cleaned);
+}
+
+// Helper function to compare collections by their field names
+function compareCollectionFields(localData: any, remoteData: any): boolean {
+  const localFields = (localData.fields || []).map((f: any) => f.field).sort();
+  const remoteFields = (remoteData.fields || []).map((f: any) => f.field).sort();
+  return JSON.stringify(localFields) === JSON.stringify(remoteFields);
 }
 
 // Helper function to compare local and remote items
@@ -1820,10 +1848,19 @@ function compareItems(
         localData: local.data,
       });
     } else {
-      // Both exist - compare normalized data
-      const normalizedLocal = normalizeForComparison(local.data, type);
-      const normalizedRemote = normalizeForComparison(remote.data, type);
-      const isDifferent = JSON.stringify(normalizedLocal) !== JSON.stringify(normalizedRemote);
+      // Both exist - compare based on type
+      let isDifferent: boolean;
+
+      if (type === 'collection') {
+        // For collections, compare field names
+        isDifferent = !compareCollectionFields(local.data, remote.data);
+      } else {
+        // For other types, compare normalized data
+        const normalizedLocal = normalizeForComparison(local.data, type);
+        const normalizedRemote = normalizeForComparison(remote.data, type);
+        isDifferent = JSON.stringify(normalizedLocal) !== JSON.stringify(normalizedRemote);
+      }
+
       result.push({
         id: `${type === 'collection' ? 'collection' : type}:${local.id}`,
         name: local.name,
